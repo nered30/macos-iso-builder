@@ -1,0 +1,74 @@
+name: Build macOS Installer ISO
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 350
+    steps:
+      - name: Show initial disk space
+        run: df -h /
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /Applications/Xcode_15*.app || true
+          sudo rm -rf /Applications/Xcode_16*.app || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/local/share/android-commandlinetools || true
+          sudo rm -rf /Users/runner/Library/Android || true
+          sudo rm -rf /usr/local/julia* || true
+          sudo rm -rf /Applications/Firefox.app /Applications/Firefox\ Developer\ Edition.app || true
+          brew cleanup -s || true
+          sudo rm -rf $(brew --cache) || true
+          df -h /
+
+      - name: Pick latest Sequoia full installer version
+        id: pick
+        run: |
+          softwareupdate --list-full-installers 2>&1 | tee /tmp/list.txt
+          VERSION=$(grep -oE '15\.[0-9]+(\.[0-9]+)?' /tmp/list.txt | sort -V | uniq | tail -1)
+          if [ -z "$VERSION" ]; then
+            echo "No 15.x full installer found, listing available versions:"
+            cat /tmp/list.txt
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Selected macOS version: $VERSION"
+
+      - name: Fetch full macOS installer
+        run: |
+          sudo softwareupdate --fetch-full-installer --full-installer-version "${{ steps.pick.outputs.version }}"
+          ls -la /Applications/ | grep -i install
+          df -h /
+
+      - name: Create scratch disk image for installer media
+        run: |
+          hdiutil create -o /tmp/SequoiaInstall -size 20g -layout GPTSPUD -fs "HFS+J"
+          hdiutil attach /tmp/SequoiaInstall.dmg -noverify -mountpoint /Volumes/install_build
+
+      - name: Run createinstallmedia
+        run: |
+          APP=$(ls -d /Applications/Install\ macOS*.app | head -1)
+          echo "Using installer app: $APP"
+          sudo "$APP/Contents/Resources/createinstallmedia" --volume /Volumes/install_build --nointeraction
+
+      - name: Convert installer media to ISO
+        run: |
+          VOL=$(ls -d /Volumes/Install\ macOS* | head -1)
+          echo "Ejecting $VOL"
+          hdiutil eject "$VOL" || true
+          hdiutil convert /tmp/SequoiaInstall.dmg -format UDTO -o /tmp/SequoiaInstall
+          mv /tmp/SequoiaInstall.cdr /tmp/SequoiaInstall.iso
+          ls -la /tmp/SequoiaInstall.iso
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-sequoia-iso
+          path: /tmp/SequoiaInstall.iso
+          retention-days: 3
+          compression-level: 0
